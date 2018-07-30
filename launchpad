@@ -1,0 +1,413 @@
+#! /usr/bin/env python3
+
+import json
+import re
+import subprocess
+import sys
+
+VERSION = 0.1
+LAST_MODIFICATION_DATE = 'July 2018'
+
+
+def load_config():
+    with open('launchpad_config.json', mode='r') as config_file:
+        result = json.load(config_file)
+    return result
+
+
+def log_error(message):
+    print('[E]  ' + message)
+
+
+def log_info(message):
+    print('[I]  ' + message)
+
+
+def log_warning(message):
+    print('[W]  ' + message)
+
+
+def regex_match(regex, string, ignore_case):
+    pattern = re.compile(regex, re.IGNORECASE) if ignore_case else re.compile(regex)
+    if pattern.match(string):
+        return True
+    return False
+
+
+def get_user_input_with_default(message, default_value):
+    result = input('~~~> ' + message + ' [' + default_value + ']: ') or default_value
+    return result
+
+
+def get_user_input(message):
+    result = input('~~~> ' + message + ': ')
+    return result
+
+
+def print_user_log(message):
+    print('~~~> ' + message)
+
+
+def prompt_yes_no(message):
+    while True:
+        answer = get_user_input(message + '[yes/no]')
+        yes_match = regex_match('yes|y', answer, True)
+        no_match = regex_match('no|n', answer, True)
+
+        if yes_match:
+            result = True
+            break
+        elif no_match:
+            result = False
+            break
+        else:
+            print_user_log('please answer "yes" or "no"')
+
+    return result
+
+
+def prompt_yes_no_with_default(message, default):
+    while True:
+        answer = get_user_input_with_default(message + '[yes/no]', 'yes' if default else 'no')
+        yes_match = regex_match('yes|y', answer, True)
+        no_match = regex_match('no|n', answer, True)
+
+        if yes_match:
+            result = True
+            break
+        elif no_match:
+            result = False
+            break
+        else:
+            print_user_log('please answer "yes" or "no"')
+
+    return result
+
+
+def tokenize_params(argv):
+    result = argv[1:]
+    return result
+
+
+def parse_single_arg(arg):
+    is_specifier = False
+    if arg.startswith('-'):
+        is_specifier = True
+        if arg.startswith('--'):
+            argument = arg[2:]
+        else:
+            argument = arg[1:]
+    else:
+        argument = arg
+
+    return argument, is_specifier
+
+
+def parse_arguments(args):
+    result = {}
+    specifier_needed = True
+    specifier = None
+
+    for arg in args:
+        argument, is_specifier = parse_single_arg(arg)
+        if specifier_needed and not is_specifier:
+            log_error('argument specifier expected got "' + arg + '" . specifiers start with one or two hifens.')
+            exit(0)
+        if is_specifier:
+            specifier = argument
+            result[specifier] = None
+            specifier_needed = False
+        else:
+            result[specifier] = argument
+            specifier_needed = True
+
+    return result
+
+
+def generate_arg_log_name(arg):
+    if arg['has_short_name'] and arg['has_long_name']:
+        name = '-' + arg['short_name'] + '/--' + arg['long_name']
+    elif arg['has_short_name']:
+        name = '-' + arg['short_name']
+    else:
+        name = '--' + arg['long_name']
+
+    return name
+
+
+class Launchpad:
+    def __init__(self):
+        self.config = load_config()
+        self.command_info = set(
+            (command['name'], command['exec_command'], command['has_arg_parser']) for command in
+            self.config['commands'])
+        self.command_name_map = {}
+        for command in self.config['commands']:
+            self.command_name_map[command['name']] = command
+
+    def get_command_by_name(self, command_name):
+        return self.command_name_map[command_name]
+
+    def get_command_info(self):
+        return self.command_info
+
+    def save_config(self):
+        with open('launchpad_config.json', mode='w') as config_file:
+            json.dump(self.config, config_file)
+
+    def add_command(self):
+
+        print('Adding a new command to launchpad')
+
+        command_name = get_user_input('enter command alias name')
+        exec_command = get_user_input('enter execution command with full paths')
+        has_arg_parser = prompt_yes_no('does this command has builtin arg parser?')
+
+        args = []
+
+        while True:
+            if has_arg_parser:
+                break
+            more_args = prompt_yes_no('does this command has more arguments?')
+            if not more_args:
+                break
+
+            short_name = None
+            long_name = None
+            default_value = None
+
+            has_short_name = prompt_yes_no('does this argument has short name?')
+            if has_short_name:
+                short_name = get_user_input('enter argument short name')
+
+            has_long_name = prompt_yes_no('does this argument has long name?')
+            if has_long_name:
+                long_name = get_user_input('enter argument long name')
+
+            has_default_value = prompt_yes_no('does this argument has default value?')
+            if has_default_value:
+                default_value = get_user_input('enter argument default value')
+
+            description = get_user_input('enter argument description')
+
+            args.append(
+                {
+                    'has_short_name': has_short_name,
+                    'short_name': short_name,
+                    'has_long_name': has_long_name,
+                    'long_name': long_name,
+                    'has_default_value': has_default_value,
+                    'default': default_value,
+                    'description': description
+                }
+            )
+
+        command_entry = {
+            'name': command_name,
+            'exec_command': exec_command,
+            'has_arg_parser': has_arg_parser,
+            'args': args
+        }
+
+        self.config['commands'].append(command_entry)
+
+    def has_self_arg_parser(self, command_name):
+        command = self.get_command_by_name(command_name)
+        return command['has_arg_parser']
+
+    def remove_command(self, command_name):
+        try:
+            command_entry = self.get_command_by_name(command_name)
+            self.config['commands'].remove(command_entry)
+        except KeyError:
+            log_error('there is no command named "' + command_name + '" registered in launchpad.')
+
+    def print_command_usage(self, command_name):
+        command = self.get_command_by_name(command_name)
+        args = command['args']
+        optional = []
+        obligatory = []
+        for arg in args:
+            if arg['has_default_value']:
+                optional.append(arg)
+            else:
+                obligatory.append(arg)
+
+        print(command_name + ' command help.')
+        print('mandatory arguments:')
+        print('option'.ljust(20) + 'description')
+        for arg in obligatory:
+            print(generate_arg_log_name(arg).ljust(20) + arg['description'])
+
+        print('optional arguments:')
+        print('option'.ljust(20) + '[default value]'.ljust(20) + 'description')
+        for arg in optional:
+            print(generate_arg_log_name(arg).ljust(20) + ('[' + arg['default'] + ']').ljust(20) + arg['description'])
+
+
+class Launcher:
+    def __init__(self):
+        self.launchpad = Launchpad()
+        self.auxiliary_commands = [
+            {
+                'short_name': 'a',
+                'long_name': 'add-command',
+                'description': 'opens a wizard to add a new command to launcher',
+                'args': [],
+                'function': self.aux_add_command
+            },
+            {
+                'short_name': 'd',
+                'long_name': 'delete-command',
+                'description': 'deletes an existing command from launcher',
+                'args': ['command name'],
+                'function': self.aux_remove_command
+            },
+            {
+                'short_name': 'i',
+                'long_name': 'import-config',
+                'description': 'import launcher config from a file',
+                'args': ['config file path'],
+                'function': self.aux_not_implemented_yet
+            },
+            {
+                'short_name': 'e',
+                'long_name': 'export-config',
+                'description': 'import launcher config from a file',
+                'args': ['output file path'],
+                'function': self.aux_not_implemented_yet
+            },
+            {
+                'short_name': 'l',
+                'long_name': 'list-commands',
+                'description': 'list launchpad commands',
+                'args': [],
+                'function': self.aux_list_commands
+            },
+            {
+                'short_name': 'v',
+                'long_name': 'version',
+                'description': 'show launchpad version',
+                'args': [],
+                'function': self.aux_version
+            },
+            {
+                'short_name': 'h',
+                'long_name': 'help',
+                'description': 'help with launchpad',
+                'args': [],
+                'function': self.aux_help
+            },
+
+        ]
+        self.args = tokenize_params(sys.argv)
+        self.process_command()
+
+    def get_arg_by_index(self, index):
+        return self.args[index]
+
+    def aux_remove_command(self):
+        command_name = self.get_arg_by_index(1)
+        self.launchpad.remove_command(command_name)
+        self.launchpad.save_config()
+
+    def aux_add_command(self):
+        self.launchpad.add_command()
+        self.launchpad.save_config()
+
+    def aux_list_commands(self):
+        info = self.launchpad.get_command_info()
+        print('ARG'.ljust(5) + 'command name'.ljust(20) + 'execution command')
+        for data in info:
+            arg_set = '[*]' if data[2] is True else '[ ]'
+            print(arg_set.ljust(5) + data[0].ljust(20) + data[1])
+
+    def aux_version(self):
+        print('launchpad version', VERSION, ',', LAST_MODIFICATION_DATE)
+
+    def print_usage(self, aux_command):
+        print(('-' + aux_command['short_name']).ljust(4) + ('--' + aux_command['long_name']).ljust(20) +
+              aux_command['description'].ljust(50) +
+              'usage: ' + 'launchpad -' + aux_command['short_name'] + '/--' + aux_command['long_name'], end='')
+
+        for arg in aux_command['args']:
+            print(' [' + arg + ']', end='')
+        print()
+
+    def aux_help(self):
+        self.aux_version()
+        print('coded with <3 in by MMF.')
+        print('available commands:')
+        for command in self.auxiliary_commands:
+            self.print_usage(command)
+
+    def aux_not_implemented_yet(self):
+        log_info('import and export config features are not yet implemented.'
+                 ' you can simply backup config files for the time being.')
+
+    def is_auxiliary_command(self):
+        return self.args[0].startswith('-')
+
+    def is_long_auxiliary_command(self):
+        return self.args[0].startswith('--')
+
+    def process_command(self):
+        if self.is_auxiliary_command():
+            self.aux_launch()
+        else:
+            self.command_launch()
+
+    def find_aux_by_name(self, name, is_long):
+        for command in self.auxiliary_commands:
+            if is_long and command['long_name'] == name or not is_long and command['short_name'] == name:
+                return command
+
+        return None
+
+    def aux_launch(self):
+        if self.is_long_auxiliary_command():
+            command = self.find_aux_by_name(self.args[0][2:], True)
+        else:
+            command = self.find_aux_by_name(self.args[0][1:], False)
+
+        command['function']()
+
+    def command_launch(self):
+        command_name = self.args[0]
+        try:
+            if self.launchpad.has_self_arg_parser(command_name):
+                self.launch(self.args)
+            else:
+                passed_arguments = parse_arguments(self.args[1:])
+                command_arguments = self.launchpad.get_command_by_name(command_name)['args']
+                final_args = []
+
+                for arg in command_arguments:
+                    if arg['short_name'] in passed_arguments:
+                        final_args.append(passed_arguments[arg['short_name']])
+                    elif arg['long_name'] in passed_arguments:
+                        final_args.append(passed_arguments[arg['long_name']])
+                    elif arg['has_default_value']:
+                        final_args.append(arg['default'])
+                    else:
+                        log_error('missing non optional argument ' + generate_arg_log_name(arg))
+                        self.launchpad.print_command_usage(command_name)
+                        exit(0)
+
+                if self.args[1] == '-h' or self.args[1] == '--help':
+                    self.launchpad.print_command_usage(command_name)
+                else:
+                    self.launch([command_name] + final_args)
+
+        except KeyError:
+            log_error('there is no command named "' + command_name + '" registered in launcher.')
+
+    def launch(self, args):
+        exec_command = self.launchpad.get_command_by_name(args[0])['exec_command']
+        args[0] = exec_command
+        args_concatenated = ' '.join(args)
+        process = subprocess.Popen(args_concatenated, shell=True)
+        process.wait()
+
+
+Launcher()
